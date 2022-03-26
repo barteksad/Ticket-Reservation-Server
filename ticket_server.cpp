@@ -142,41 +142,44 @@ private:
             is_picked_up = true;
         }
 
-        [[maybe_unused]] friend std::ostream &operator<<(std::ostream &os, const std::unique_ptr<TicketReservation> &ticket_reservation)
+        [[maybe_unused]] friend std::ostream &operator<<(std::ostream &os, const TicketReservation &ticket_reservation)
         {
-            os << "RESERVATION: " << ticket_reservation->reservation_id << " tickets: ";
-            for (auto &t : ticket_reservation->tickets)
+            os << "RESERVATION: " << ticket_reservation.reservation_id << " tickets: ";
+            for (auto &t : ticket_reservation.tickets)
                 os << t.data << ", ";
 
             return os;
         }
-
-        bool operator==(const TicketReservation &other) const
-        {
-            return this->reservation_id == other.reservation_id;
-        }
     };
 
-    // https://stackoverflow.com/questions/32613304/find-a-value-in-an-unordered-set-of-shared-ptr
-    struct Deref
-    {
-        struct Hash
-        {
-            std::size_t operator()(std::unique_ptr<TicketReservation> const &p) const
-            {
-                return std::hash<reservation_id_t>()(p->get_reservation_id());
-            }
-        };
 
         struct Compare
         {
-            size_t operator()(reservation_id_t const reservation_id,
-                              std::unique_ptr<TicketReservation> const &b) const
+            using is_transparent = void;
+            auto operator()(TicketReservation const &a,
+                              TicketReservation const &b) const
             {
-                return reservation_id == b.get()->get_reservation_id();
+                return a.get_reservation_id() < b.get_reservation_id();
+            }
+
+            auto operator()(reservation_id_t const a,
+                              reservation_id_t const b) const
+            {
+                return a < b;
+            }
+
+            auto operator()(TicketReservation const &a,
+                              reservation_id_t const b) const
+            {
+                return a.get_reservation_id() == b;
+            }
+
+            auto operator()(reservation_id_t const a,
+                              TicketReservation const &b) const
+            {
+                return a < b.get_reservation_id();
             }
         };
-    };
 
     cookie_t get_reservation_cookie(reservation_id_t reservation_id)
     {
@@ -190,7 +193,7 @@ private:
 
     std::unordered_map<std::string, event_id_t> descrition_to_event_id_map; // next event id = next available id starting from 0
     std::unordered_map<event_id_t, ticket_count_t> event_id_to_tickets_count_map;
-    std::unordered_set<std::unique_ptr<TicketReservation>, Deref::Hash, Deref::Compare> reservations_set;
+    std::set<TicketReservation, Compare> reservations_set;
     std::mt19937 random_state;
 
 public:
@@ -220,7 +223,7 @@ public:
     {
         for (auto reservation_it = reservations_set.cbegin(); reservation_it != reservations_set.cend();)
         {
-            if (!reservation_it->get()->is_valid())
+            if (!reservation_it->is_valid())
                 reservations_set.erase(reservation_it++);
             else
                 ++reservation_it;
@@ -282,17 +285,17 @@ public:
             event_map[event_id] += ticket_count;
         };
 
-        auto new_reservation = reservations_set.emplace(std::make_unique<TicketReservation>(ticket_count, random_state, ticket_resore_callback));
-        reservation_id_t reservation_id = new_reservation.first->get()->get_reservation_id();
+        auto new_reservation = reservations_set.emplace(ticket_count, random_state, ticket_resore_callback);
+        reservation_id_t reservation_id = new_reservation.first->get_reservation_id();
         cookie_t cookie = get_reservation_cookie(reservation_id);
-        expiration_time_t expiration_time = new_reservation.first->get()->get_expiration_time();
+        expiration_time_t expiration_time = new_reservation.first->get_expiration_time();
 
         return {reservation_id, cookie, expiration_time};
     }
 
     std::vector<char> get_tickets(reservation_id_t reservation_id, std::vector<char> cookie)
     {
-        // auto reservation_it = reservations_set.find(reservation_id);
+        auto reservation_it = reservations_set.find(reservation_id);
 
     }
 };
