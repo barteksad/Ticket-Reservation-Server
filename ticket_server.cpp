@@ -35,7 +35,7 @@ using description_length_t = uint8_t;
 using ticket_count_t = uint16_t;
 using event_id_t = uint32_t;
 using reservation_id_t = uint32_t;
-using expiration_time_t = int64_t;
+using expiration_time_t = uint64_t;
 using cookie_t = std::vector<char>;
 
 const uint16_t DEFAULT_SERVER_PORT = 2022;
@@ -43,6 +43,7 @@ const expiration_time_t DEFAULT_TIMEOUT = 5;
 const size_t TICKET_SIZE = 7;
 const size_t DEBUG_MAX_MESSAGE_PRINT_LEN = 100;
 const size_t COOKIE_SIZE = 48;
+const size_t TICKETS_RESPONSE_HEADER_SIZE = sizeof(reservation_id_t) + sizeof(ticket_count_t);
 
 const int BUFFER_SIZE = 65527;
 
@@ -74,39 +75,7 @@ private:
         std::vector<Ticket> tickets;
         expiration_time_t expiration_time;
         bool is_picked_up;
-
-    public:
-        TicketReservation(ticket_count_t ticket_count, std::mt19937 &random_state_ref)
-            : is_picked_up(false)
-        {
-            reservation_id = random_state_ref() % (std::numeric_limits<reservation_id_t>::max() - 999999) + 999999;
-
-            tickets.resize(ticket_count);
-            for (auto i = 0; i < ticket_count; i++)
-                tickets[i] = generate_ticket(random_state_ref);
-
-            auto time_now = std::chrono::system_clock::now();
-            expiration_time = std::chrono::duration_cast<std::chrono::seconds>(time_now.time_since_epoch()).count();
-        }
-
-        reservation_id_t get_reservation_id() const
-        {
-            return this->reservation_id;
-        }
-
-        expiration_time_t get_expiration_time() const 
-        {
-            return this-> expiration_time;
-        }
-
-        [[maybe_unused]] friend std::ostream &operator<<(std::ostream &os, const std::unique_ptr<TicketReservation> &ticket_reservation)
-        {
-            os << "RESERVATION: " << ticket_reservation->reservation_id << " tickets: ";
-            for (auto &t : ticket_reservation->tickets)
-                os << t.data << ", ";
-
-            return os;
-        }
+        std::function<void(void)> restore_tickets;
 
         Ticket generate_ticket(std::mt19937 &random_state_ref)
         {
@@ -121,26 +90,99 @@ private:
             return ticket;
         }
 
-        bool operator==(const TicketReservation& other)
+    public:
+        TicketReservation(ticket_count_t ticket_count, std::mt19937 &random_state_ref, std::function<void(void)> restore_tickets)
+            : is_picked_up(false), restore_tickets(restore_tickets)
+        {
+            reservation_id = random_state_ref() % (std::numeric_limits<reservation_id_t>::max() - 999999) + 999999;
+
+            tickets.resize(ticket_count);
+            for (auto i = 0; i < ticket_count; i++)
+                tickets[i] = generate_ticket(random_state_ref);
+
+            uint64_t time_now = time(NULL);
+            expiration_time = time_now + DEFAULT_TIMEOUT;
+        }
+
+        ~TicketReservation()
+        {
+            // std::cerr << " destructor of reservation " << reservation_id << " ";
+            restore_tickets();
+        }
+
+        reservation_id_t get_reservation_id() const
+        {
+            return this->reservation_id;
+        }
+
+        expiration_time_t get_expiration_time() const
+        {
+            return this->expiration_time;
+        }
+
+        ticket_count_t get_ticket_count() const
+        {
+            return tickets.size();
+        }
+
+        bool is_valid() const
+        {
+            if (is_picked_up)
+                return true;
+            uint64_t time_now = time(NULL);
+            // if(DEBUG)
+            // {
+            //     std::cerr << "time now : " << time_now << " expiration time : "<< expiration_time << " difference " <<time_now - expiration_time << "\n";
+            // }
+            return time_now < expiration_time;
+        }
+
+        void pick_up()
+        {
+            is_picked_up = true;
+        }
+
+        [[maybe_unused]] friend std::ostream &operator<<(std::ostream &os, const std::unique_ptr<TicketReservation> &ticket_reservation)
+        {
+            os << "RESERVATION: " << ticket_reservation->reservation_id << " tickets: ";
+            for (auto &t : ticket_reservation->tickets)
+                os << t.data << ", ";
+
+            return os;
+        }
+
+        bool operator==(const TicketReservation &other) const
         {
             return this->reservation_id == other.reservation_id;
         }
     };
 
-    // struct TicketReservationHash
-    // {
-    //     std::size_t operator<(const std::unique_ptr<TicketReservation> &ticket_reservation) const
-    //     {
-    //         return std::hash<reservation_id_t>{}(ticket_reservation->get_reservation_id());
-    //     }
-    // };
+    // https://stackoverflow.com/questions/32613304/find-a-value-in-an-unordered-set-of-shared-ptr
+    struct Deref
+    {
+        struct Hash
+        {
+            std::size_t operator()(std::unique_ptr<TicketReservation> const &p) const
+            {
+                return std::hash<reservation_id_t>()(p->get_reservation_id());
+            }
+        };
 
+        struct Compare
+        {
+            size_t operator()(reservation_id_t const reservation_id,
+                              std::unique_ptr<TicketReservation> const &b) const
+            {
+                return reservation_id == b.get()->get_reservation_id();
+            }
+        };
+    };
 
     cookie_t get_reservation_cookie(reservation_id_t reservation_id)
     {
         cookie_t cookie(COOKIE_SIZE);
         srand(reservation_id);
-        for(char &c: cookie)
+        for (char &c : cookie)
             c = rand() % (126 - 33) + 33;
 
         return cookie;
@@ -148,7 +190,7 @@ private:
 
     std::unordered_map<std::string, event_id_t> descrition_to_event_id_map; // next event id = next available id starting from 0
     std::unordered_map<event_id_t, ticket_count_t> event_id_to_tickets_count_map;
-    std::unordered_set<std::unique_ptr<TicketReservation>> reservations_set;
+    std::unordered_set<std::unique_ptr<TicketReservation>, Deref::Hash, Deref::Compare> reservations_set;
     std::mt19937 random_state;
 
 public:
@@ -163,7 +205,7 @@ public:
         {
             std::string tmp;
             getline(file, tmp);
-            std::cerr <<event_name<<" "<< tmp << "\n";
+            std::cerr << event_name << " " << tmp << "\n";
             ticket_count_t ticket_count = std::stoi(tmp);
             event_id_t event_id = descrition_to_event_id_map.size();
 
@@ -174,15 +216,28 @@ public:
         file.close();
     }
 
+    void check_reservation_timeouts()
+    {
+        for (auto reservation_it = reservations_set.cbegin(); reservation_it != reservations_set.cend();)
+        {
+            if (!reservation_it->get()->is_valid())
+                reservations_set.erase(reservation_it++);
+            else
+                ++reservation_it;
+        }
+    }
+
     std::vector<std::tuple<std::string, event_id_t, ticket_count_t>> get_events()
     {
+        check_reservation_timeouts();
+
         std::vector<std::tuple<std::string, event_id_t, ticket_count_t>> events;
         std::for_each(
             descrition_to_event_id_map.begin(),
             descrition_to_event_id_map.end(),
             [&](auto event)
             {
-                events.push_back({event.first,event.second, event_id_to_tickets_count_map[event.second]});
+                events.push_back({event.first, event.second, event_id_to_tickets_count_map[event.second]});
             });
 
         if (DEBUG)
@@ -190,7 +245,7 @@ public:
             std::cerr << "Events and free tickets: ";
             for (auto p : events)
             {
-                std::cerr << std::get<0>(p) << " :" << std::get<1>(p) << " "<< std::get<2>(p) << ", ";
+                std::cerr << std::get<0>(p) << " :" << std::get<1>(p) << " " << std::get<2>(p) << ", ";
             }
             std::cerr << "\n";
         }
@@ -198,21 +253,47 @@ public:
         return events;
     }
 
-    // reservation_id, event_id, ticket_count, cookie, expiration_time
     std::tuple<reservation_id_t, cookie_t, expiration_time_t> create_reservation(event_id_t event_id, ticket_count_t ticket_count)
     {
-        auto it = event_id_to_tickets_count_map.find(event_id);
-        if(ticket_count == 0 || it == event_id_to_tickets_count_map.end() || it->second <= ticket_count)
-            throw std::runtime_error("ticket reservation error!");
-        else
-            it->second-=ticket_count;
+        size_t ticket_size = ticket_count * sizeof(Ticket);
+        if (ticket_count == 0 || ticket_size + TICKETS_RESPONSE_HEADER_SIZE > BUFFER_SIZE)
+            throw std::runtime_error("ticket reservation error! invalid ticket count");
 
-        auto new_reservation = reservations_set.emplace(std::make_unique<TicketReservation>(ticket_count, random_state));
+        auto event_it = event_id_to_tickets_count_map.find(event_id);
+        if(event_it == event_id_to_tickets_count_map.end())
+            throw std::runtime_error("ticket reservation error! no such event");
+        else if (event_it->second < ticket_count)
+            check_reservation_timeouts();
+
+        event_it = event_id_to_tickets_count_map.find(event_id);
+        if (DEBUG)  
+                std::cerr << "ticket count: " << event_it->second << " ";
+        if (event_it->second < ticket_count)
+        {
+            throw std::runtime_error("ticket reservation error! no free tickets");
+        }
+        else
+            event_it->second -= ticket_count;
+
+        auto ticket_resore_callback = [event_id, ticket_count, &event_map = event_id_to_tickets_count_map]() mutable
+        {
+            if (DEBUG)
+                std::cerr << "restore " << ticket_count << " to event id " << event_id<<"\n";
+            event_map[event_id] += ticket_count;
+        };
+
+        auto new_reservation = reservations_set.emplace(std::make_unique<TicketReservation>(ticket_count, random_state, ticket_resore_callback));
         reservation_id_t reservation_id = new_reservation.first->get()->get_reservation_id();
         cookie_t cookie = get_reservation_cookie(reservation_id);
         expiration_time_t expiration_time = new_reservation.first->get()->get_expiration_time();
 
         return {reservation_id, cookie, expiration_time};
+    }
+
+    std::vector<char> get_tickets(reservation_id_t reservation_id, std::vector<char> cookie)
+    {
+        // auto reservation_it = reservations_set.find(reservation_id);
+
     }
 };
 
@@ -267,8 +348,8 @@ private:
 
     size_t handle_get_events()
     {
-        if(DEBUG)
-            std::cerr<< "got GET_EVENTS, ";
+        if (DEBUG)
+            std::cerr << "got GET_EVENTS, ";
 
         buffer[0] = (message_id_t)request_type_t::EVENTS;
 
@@ -299,10 +380,10 @@ private:
             ticket_count_t ticket_count = std::get<2>(events[i]);
 
             // order : event_id, ticket_count, description_length, description,
-            buffer[buffer_index++] = (uint8_t) ((event_id >> 24) & 0xff);
-            buffer[buffer_index++] = (uint8_t) ((event_id >> 16) & 0xff);
-            buffer[buffer_index++] = (uint8_t) ((event_id >> 8) & 0xff);
-            buffer[buffer_index++] = (uint8_t) (event_id & 0xff);
+            buffer[buffer_index++] = (uint8_t)((event_id >> 24) & 0xff);
+            buffer[buffer_index++] = (uint8_t)((event_id >> 16) & 0xff);
+            buffer[buffer_index++] = (uint8_t)((event_id >> 8) & 0xff);
+            buffer[buffer_index++] = (uint8_t)(event_id & 0xff);
 
             buffer[buffer_index++] = (uint8_t)((ticket_count >> 8) & 0xff);
             buffer[buffer_index++] = (uint8_t)(ticket_count & 0xff);
@@ -317,8 +398,8 @@ private:
 
     size_t handle_get_reservation()
     {
-        if(DEBUG)
-            std::cerr<< "got GET_RESERVATION, ";
+        if (DEBUG)
+            std::cerr << "got GET_RESERVATION, ";
         // event_id, ticket_count
         event_id_t event_id = ntohl(*(event_id_t *)(buffer + 1));
         ticket_count_t ticket_count = ntohs(*(ticket_count_t *)(buffer + sizeof(event_id_t) + 1));
@@ -332,42 +413,46 @@ private:
         {
             std::tie(reservation_id, cookie, expiration_time) = ticket_menager.create_reservation(event_id, ticket_count);
         }
-        catch(const std::exception& e)
+        catch (const std::exception &e)
         {
-            if(DEBUG)
+            if (DEBUG)
                 std::cerr << e.what() << '\n';
-            buffer[0] = (message_id_t) request_type_t::BAD_REQUEST;
-            // event id is not hanged since reciving message so we do not have to set it 
+            buffer[0] = (message_id_t)request_type_t::BAD_REQUEST;
+            // event id is not hanged since reciving message so we do not have to set it
             return 1 + sizeof(event_id_t);
         }
 
-        struct ReservationResponse response {
+        struct ReservationResponse response
+        {
             .reservation_id = htonl(reservation_id),
             .event_id = htonl(event_id),
             .ticket_count = htons(ticket_count),
             .expiration_time = htobe64(expiration_time)
         };
 
-        for(size_t i = 0; i < COOKIE_SIZE; i++)
+        for (size_t i = 0; i < COOKIE_SIZE; i++)
             response.cookie[i] = cookie[i];
 
         size_t size = sizeof(response);
-        char *pchar = (char *) &response;
-        
-        buffer[0] = (message_id_t) request_type_t::RESERVATION;
-        for(size_t i = 0; i < size; i++)
-            buffer[i+1] = pchar[i];
+        char *pchar = (char *)&response;
+
+        buffer[0] = (message_id_t)request_type_t::RESERVATION;
+        for (size_t i = 0; i < size; i++)
+            buffer[i + 1] = pchar[i];
 
         return size + 1;
     }
+
     size_t handle_get_tickets()
     {
-        return 0;
+        // reservation_id, cookie
+        reservation_id_t reservation_id = *(reservation_id_t *)(buffer + 1);
+        std::vector<char> cookie(buffer + 1 + sizeof(reservation_id), buffer + 1 + sizeof(reservation_id) + COOKIE_SIZE);
     }
 
     size_t handle_request()
     {
-        request_type_t request_type{(message_id_t) buffer[0]};
+        request_type_t request_type{(message_id_t)buffer[0]};
         size_t response_len = 0;
 
         switch (request_type)
@@ -427,7 +512,7 @@ public:
         while (true)
         {
             size_t read_length = read_message(&client_address);
-            if(read_length == 0)
+            if (read_length == 0)
                 continue;
             char *client_ip = inet_ntoa(client_address.sin_addr);
             uint16_t client_port = ntohs(client_address.sin_port);
@@ -441,10 +526,10 @@ public:
             }
 
             size_t response_len = handle_request();
-            if(response_len == 0)
+            if (response_len == 0)
                 continue;
 
-            send_message(&client_address,  response_len);
+            send_message(&client_address, response_len);
         }
     }
 };
