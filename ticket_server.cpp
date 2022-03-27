@@ -15,6 +15,7 @@
 #include <functional>
 #include <limits>
 #include <cassert>
+#include <bitset>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -45,7 +46,8 @@ const size_t DEBUG_MAX_MESSAGE_PRINT_LEN = 100;
 const size_t COOKIE_SIZE = 48;
 const size_t TICKETS_RESPONSE_HEADER_SIZE = sizeof(reservation_id_t) + sizeof(ticket_count_t);
 
-const int BUFFER_SIZE = 65527;
+
+const int BUFFER_SIZE = 65507;
 
 enum class request_type_t : message_id_t
 {
@@ -73,8 +75,9 @@ private:
     private:
         reservation_id_t reservation_id;
         std::vector<Ticket> tickets;
-        expiration_time_t expiration_time;
-        bool is_picked_up;
+        uint64_t timeout;
+        std::chrono::system_clock::time_point time_created;
+        mutable bool is_picked_up;
         std::function<void(void)> restore_tickets;
 
         Ticket generate_ticket(std::mt19937 &random_state_ref)
@@ -83,25 +86,36 @@ private:
             for (size_t i = 0; i < TICKET_SIZE; i++)
             {
                 if (random_state_ref() % 2 == 0)
-                    ticket.data[i] = 'a' + random_state_ref() % 26;
+                    ticket.data[i] = 'A' + random_state_ref() % 26;
                 else
                     ticket.data[i] = '0' + random_state_ref() % 10;
+
             }
+            // if(DEBUG)
+            // {
+            //     std::cerr << "generated ticket: ";
+            //     for(size_t i = 0; i < TICKET_SIZE; i++)
+            //         std::cerr << (char)ticket.data[i];
+            //     std::cerr << "\n";
+            // }
             return ticket;
         }
 
     public:
-        TicketReservation(ticket_count_t ticket_count, std::mt19937 &random_state_ref, std::function<void(void)> restore_tickets)
-            : is_picked_up(false), restore_tickets(restore_tickets)
+        TicketReservation(ticket_count_t ticket_count, uint64_t timeout, std::mt19937 &random_state_ref, std::function<void(void)> restore_tickets)
+            : timeout(timeout), is_picked_up(false), restore_tickets(restore_tickets)
         {
-            reservation_id = random_state_ref() % (std::numeric_limits<reservation_id_t>::max() - 999999) + 999999;
+            // reservation_id = random_state_ref() % (std::numeric_limits<reservation_id_t>::max() - 999999) + 999999;
+            static reservation_id_t ids = 999999;
+            reservation_id = ids ++;
+            if(DEBUG)   
+                std::cerr << " constructor of reservation " << reservation_id << " ";
 
             tickets.resize(ticket_count);
             for (auto i = 0; i < ticket_count; i++)
                 tickets[i] = generate_ticket(random_state_ref);
 
-            uint64_t time_now = time(NULL);
-            expiration_time = time_now + DEFAULT_TIMEOUT;
+            time_created = std::chrono::system_clock::now();
         }
 
         ~TicketReservation()
@@ -110,34 +124,38 @@ private:
             restore_tickets();
         }
 
-        reservation_id_t get_reservation_id() const
+        reservation_id_t get_reservation_id() const noexcept
         {
             return this->reservation_id;
         }
 
-        expiration_time_t get_expiration_time() const
+        expiration_time_t get_expiration_time() const noexcept
         {
-            return this->expiration_time;
+            return std::chrono::duration_cast<std::chrono::seconds>(time_created.time_since_epoch() + std::chrono::seconds(timeout)).count();
         }
 
-        ticket_count_t get_ticket_count() const
+        ticket_count_t get_ticket_count() const noexcept
         {
             return tickets.size();
+        }
+
+        const std::vector<Ticket>& get_tickets() const
+        {
+            return tickets;
         }
 
         bool is_valid() const
         {
             if (is_picked_up)
                 return true;
-            uint64_t time_now = time(NULL);
+            std::chrono::system_clock::time_point time_now = std::chrono::system_clock::now();
+            auto diff = std::chrono::duration_cast<std::chrono::seconds>(time_now - time_created).count();
             // if(DEBUG)
-            // {
-            //     std::cerr << "time now : " << time_now << " expiration time : "<< expiration_time << " difference " <<time_now - expiration_time << "\n";
-            // }
-            return time_now < expiration_time;
+            //     std::cerr << "time difference " << diff << "\n";
+            return diff < timeout;
         }
 
-        void pick_up()
+        void pick_up() const noexcept
         {
             is_picked_up = true;
         }
@@ -171,7 +189,7 @@ private:
             auto operator()(TicketReservation const &a,
                               reservation_id_t const b) const
             {
-                return a.get_reservation_id() == b;
+                return a.get_reservation_id() < b;
             }
 
             auto operator()(reservation_id_t const a,
@@ -191,13 +209,15 @@ private:
         return cookie;
     }
 
-    std::unordered_map<std::string, event_id_t> descrition_to_event_id_map; // next event id = next available id starting from 0
+    uint64_t timeout;
+    std::unordered_multimap<std::string, event_id_t> descrition_to_event_id_map; // next event id = next available id starting from 0
     std::unordered_map<event_id_t, ticket_count_t> event_id_to_tickets_count_map;
     std::set<TicketReservation, Compare> reservations_set;
     std::mt19937 random_state;
 
 public:
-    TicketMenager(std::string file_path)
+    TicketMenager(std::string file_path, uint64_t timeout)
+    : timeout(timeout)
     {
         // we assume that the file is correct
         std::ifstream file;
@@ -208,7 +228,7 @@ public:
         {
             std::string tmp;
             getline(file, tmp);
-            std::cerr << event_name << " " << tmp << "\n";
+            // std::cerr << event_name << " " << tmp << "\n";
             ticket_count_t ticket_count = std::stoi(tmp);
             event_id_t event_id = descrition_to_event_id_map.size();
 
@@ -246,10 +266,10 @@ public:
         if (DEBUG)
         {
             std::cerr << "Events and free tickets: ";
-            for (auto p : events)
-            {
-                std::cerr << std::get<0>(p) << " :" << std::get<1>(p) << " " << std::get<2>(p) << ", ";
-            }
+            // for (auto p : events)
+            // {
+            //     std::cerr << std::get<0>(p) << " :" << std::get<1>(p) << " " << std::get<2>(p) << ", ";
+            // }
             std::cerr << "\n";
         }
 
@@ -285,7 +305,7 @@ public:
             event_map[event_id] += ticket_count;
         };
 
-        auto new_reservation = reservations_set.emplace(ticket_count, random_state, ticket_resore_callback);
+        auto new_reservation = reservations_set.emplace(ticket_count, timeout, random_state, ticket_resore_callback);
         reservation_id_t reservation_id = new_reservation.first->get_reservation_id();
         cookie_t cookie = get_reservation_cookie(reservation_id);
         expiration_time_t expiration_time = new_reservation.first->get_expiration_time();
@@ -293,10 +313,35 @@ public:
         return {reservation_id, cookie, expiration_time};
     }
 
-    std::vector<char> get_tickets(reservation_id_t reservation_id, std::vector<char> cookie)
+    std::vector<char> get_tickets(reservation_id_t reservation_id, cookie_t cookie)
     {
-        auto reservation_it = reservations_set.find(reservation_id);
+        if(cookie != get_reservation_cookie(reservation_id))
+            throw std::runtime_error("invalid reservation cookie!");
 
+        std::set<TicketReservation, Compare>::iterator reservation_it = reservations_set.find(reservation_id);
+        if (reservation_it == reservations_set.end())
+            throw std::runtime_error("no such reservation!");
+        else
+        {
+            if (!reservation_it->is_valid())
+            {
+                reservations_set.erase(reservation_it);
+                throw std::runtime_error("reservation has expired!");
+            }
+            else
+                reservation_it->pick_up();
+        }
+
+        const std::vector<Ticket>& tickets = reservation_it->get_tickets();
+        std::vector<char> encoded_tickets(sizeof(Ticket) * tickets.size());
+
+        for(size_t i =0; i < tickets.size(); i++)
+        {
+            for(size_t j = 0; j < sizeof(Ticket); j++)
+                encoded_tickets[i*sizeof(Ticket) + j] = *(((char*) &tickets[i]) + j);
+        }
+
+        return encoded_tickets;
     }
 };
 
@@ -315,7 +360,7 @@ private:
         reservation_id_t reservation_id;
         event_id_t event_id;
         ticket_count_t ticket_count;
-        char cookie[COOKIE_SIZE];
+        char cookie[48];
         expiration_time_t expiration_time;
     };
 
@@ -396,6 +441,8 @@ private:
                 buffer[buffer_index++] = c;
         }
 
+        if(DEBUG)   
+            std::cerr << "sending : " << buffer_index <<" bytes\n";
         return buffer_index;
     }
 
@@ -449,8 +496,36 @@ private:
     size_t handle_get_tickets()
     {
         // reservation_id, cookie
-        reservation_id_t reservation_id = *(reservation_id_t *)(buffer + 1);
-        std::vector<char> cookie(buffer + 1 + sizeof(reservation_id), buffer + 1 + sizeof(reservation_id) + COOKIE_SIZE);
+        reservation_id_t reservation_id = ntohl(*(reservation_id_t *)(buffer + 1));
+        cookie_t cookie(buffer + 1 + sizeof(reservation_id), buffer + 1 + sizeof(reservation_id) + COOKIE_SIZE);
+
+        std::vector<char> tickets;
+        try
+        {
+            tickets = ticket_menager.get_tickets(reservation_id, cookie);
+        }
+        catch(const std::exception& e)
+        {
+            if(DEBUG)   
+                std::cerr << e.what() << '\n';
+            buffer[0] = (message_id_t)request_type_t::BAD_REQUEST;
+            // reservation id is not hanged since reciving message so we do not have to set it
+            return 1 + sizeof(reservation_id_t);
+        }
+
+        buffer[0] = (message_id_t)request_type_t::TICKETS;
+        // reservation id is not hanged since reciving message so we do not have to set it
+        // ticket_count_t ticket_count_net_order = htons(tickets.size() / TICKET_SIZE);
+        ticket_count_t ticket_count_net_order = tickets.size() / TICKET_SIZE;
+        buffer[1 + sizeof(reservation_id)] = (uint8_t) ((ticket_count_net_order >> 8) & 0xff);
+        buffer[1 + sizeof(reservation_id) + 1] = (uint8_t) (ticket_count_net_order & 0xff);
+        
+        for(size_t i = 0; i < tickets.size(); i++)
+            buffer[i + 1 + sizeof(reservation_id) + sizeof(ticket_count_t)] = tickets[i];
+
+        if(DEBUG)
+            std::cerr << "ticket message size: " << 1 + sizeof(reservation_id) + tickets.size() << "\n";
+        return 1 + sizeof(reservation_id) + sizeof(ticket_count_t) + tickets.size();
     }
 
     size_t handle_request()
@@ -479,15 +554,15 @@ private:
 
 public:
     TicketServer(std::string file_path, uint16_t port, uint64_t timeout)
-        : ticket_menager(file_path), port(port), timeout(timeout)
+        : ticket_menager(file_path, timeout), port(port), timeout(timeout)
     {
         memset(buffer, 0, sizeof(buffer));
         // socket binding
         socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (socket_fd <= 0)
         {
-            std::cerr << "errno code:  " << strerror(errno) << " " << errno;
-            throw std::runtime_error("Unable to start server on specified port!");
+            std::cerr << "Unable to start server on specified port! errno code:  " << strerror(errno) << " " << errno;
+            exit(1);
         }
 
         struct sockaddr_in server_address;
@@ -498,8 +573,8 @@ public:
         if (bind(socket_fd, (struct sockaddr *)&server_address,
                  (socklen_t)sizeof(server_address)) != 0)
         {
-            std::cerr << "errno code:  " << strerror(errno) << " " << errno;
-            throw std::runtime_error("Unable to start server on specified port!");
+            std::cerr << "Unable to start server on specified port! errno code:  " << strerror(errno) << " " << errno;
+            exit(1);
         }
 
         if (DEBUG)
@@ -544,7 +619,17 @@ int main(const int argc, const char *argv[])
     uint16_t port;
     uint64_t timeout;
 
-    std::tie(file_path, port, timeout) = pase_arguments(argc, argv);
+    try
+    {
+        std::tie(file_path, port, timeout) = pase_arguments(argc, argv);
+    }
+    catch(const std::exception& e)
+    {
+        if(DEBUG)
+            std::cerr << e.what() << '\n';
+        return 1;
+    }
+    
 
     TicketServer ticket_server(file_path, port, timeout);
     ticket_server.listen();
@@ -561,7 +646,7 @@ std::tuple<std::string, uint16_t, expiration_time_t> pase_arguments(const int ar
     {
         std::cerr << "Arguments: ";
         for (auto &s : args)
-            std::cerr << s << " ";
+            std::cerr << "|" << s << "| ";
         std::cerr << "\n";
     }
 
@@ -574,27 +659,18 @@ std::tuple<std::string, uint16_t, expiration_time_t> pase_arguments(const int ar
 
     // process file path argument
     auto it = std::find(args.begin(), args.end(), "-f");
-    if (it == args.end() || std::next(it, 1) == args.end())
+    if (it == args.end() || std::next(it, 1) == args.end() || std::next(it, 1)->length() == 0)
         throw std::invalid_argument("you must specify events file path!");
     else
     {
         matched_arguments.insert(*it);
         it++;
-        try
-        {
-            std::ifstream file;
-            file.open(*it);
-            file.close();
-            file_path = *it;
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << __LINE__ << " " << e.what() << '\n';
-            std::stringstream message;
-            message << "incorrect file path or invalid file!"
-                    << " " << *it;
-            throw std::invalid_argument(message.str());
-        }
+
+        std::ifstream file(*it);
+        if(!file.good())
+            throw std::invalid_argument("invalid file path!");
+        file_path = *it;
+
         matched_arguments.insert(*it);
     }
 
@@ -606,19 +682,14 @@ std::tuple<std::string, uint16_t, expiration_time_t> pase_arguments(const int ar
     {
         matched_arguments.insert(*it);
         it++;
-        try
-        {
-            std::stringstream maybe_port(*it);
-            maybe_port >> port;
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << __LINE__ << " " << e.what() << '\n';
-            std::stringstream message;
-            message << "invalid port number!"
-                    << " " << *it;
-            throw std::invalid_argument(message.str());
-        }
+
+        errno = 0;
+        int maybe_port = stoi(*it, NULL);
+        if(maybe_port < 0 || maybe_port > std::numeric_limits<uint16_t>::max() || errno != 0)
+            throw std::invalid_argument("invalid port number!");
+        port = maybe_port;
+    
+   
         matched_arguments.insert(*it);
     }
 
@@ -630,30 +701,24 @@ std::tuple<std::string, uint16_t, expiration_time_t> pase_arguments(const int ar
     {
         matched_arguments.insert(*it);
         it++;
-        try
-        {
-            std::stringstream maybe_timeout(*it);
-            maybe_timeout >> timeout;
-            if (timeout < 1 || timeout > 86400)
-                throw std::invalid_argument("incorrect timeout range!");
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << __LINE__ << " " << e.what() << '\n';
-            std::stringstream message;
-            message << "invalid timeout value!"
-                    << " " << *it;
-            throw std::invalid_argument(message.str());
-        }
+
+        std::stringstream maybe_timeout(*it);
+        maybe_timeout >> timeout;
+        if (timeout < 1 || timeout > 86400)
+            throw std::invalid_argument("incorrect timeout range!");
+
         matched_arguments.insert(*it);
     }
 
+    if(args.size() != matched_arguments.size())
+        throw std::invalid_argument("invalid arguments!");
     if (!std::all_of(
             args.begin(),
             args.end(),
             [&](auto argument)
             { return matched_arguments.find(argument) != matched_arguments.end(); }))
         throw std::invalid_argument("invalid arguments!");
+
 
     return {file_path, port, timeout};
 }
