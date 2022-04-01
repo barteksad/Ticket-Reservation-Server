@@ -1,0 +1,1 @@
+g++ -g -Wall -Wextra -Wno-implicit-fallthrough -DNDEBUG -std=c++17 ticket_server.cpp -o ticket_server

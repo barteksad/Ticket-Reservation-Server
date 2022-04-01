@@ -2,6 +2,5 @@ a.out
 ticket_server
 .vscode
 events_example
-compile.sh
 testy*
 nic.cpp
