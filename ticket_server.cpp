@@ -45,8 +45,8 @@ const size_t COOKIE_SIZE = 48;
 const size_t TICKETS_RESPONSE_HEADER_SIZE = sizeof(reservation_id_t) + sizeof(ticket_count_t);
 const size_t GET_EVENTS_REQUEST_SIZE = sizeof(message_id_t);
 const size_t GET_RESERVATION_REQUEST_SIZE = sizeof(message_id_t) + sizeof(event_id_t) + sizeof(ticket_count_t);
-const size_t GET_TICKETS_REQUEST_SIZE  = sizeof(message_id_t) + sizeof(reservation_id_t) + COOKIE_SIZE;
-const int BUFFER_SIZE = 65507; // max UDP size
+const size_t GET_TICKETS_REQUEST_SIZE = sizeof(message_id_t) + sizeof(reservation_id_t) + COOKIE_SIZE;
+const int BUFFER_SIZE = 65507;                   // max UDP size
 const size_t DEBUG_MAX_RECEIVE_BYTES_PRINT = 20; // gets printed in server.listen()
 
 enum class request_type_t : message_id_t
@@ -84,21 +84,22 @@ private:
         int64_t timeout;
         std::vector<Ticket> tickets;
         std::function<void(void)> restore_tickets;
-        
+
         Ticket generate_ticket(std::mt19937 &random_state_ref) const noexcept
         {
             static std::unordered_set<std::string> tickets_in_use;
             Ticket ticket;
 
-            do {
-
-            for (size_t i = 0; i < TICKET_SIZE; i++)
+            do
             {
-                if (random_state_ref() % 2 == 0)
-                    ticket.data[i] = 'A' + random_state_ref() % 26;
-                else
-                    ticket.data[i] = '0' + random_state_ref() % 10;
-            }
+
+                for (size_t i = 0; i < TICKET_SIZE; i++)
+                {
+                    if (random_state_ref() % 3 == 0)
+                        ticket.data[i] = '0' + random_state_ref() % 10;
+                    else
+                        ticket.data[i] = 'A' + random_state_ref() % 26;
+                }
             } while (tickets_in_use.find(ticket.to_string()) != tickets_in_use.end());
             tickets_in_use.insert(ticket.to_string());
             return ticket;
@@ -162,11 +163,11 @@ private:
 
     reservation_id_t generate_reservation_id()
     {
+        static const reservation_id_t min_reservation_id = 1000000;
         reservation_id_t new_id;
-
         do
         {
-            new_id = random_state() + 1000000;
+            new_id = random_state() % (std::numeric_limits<reservation_id_t>::max() - min_reservation_id) + min_reservation_id;
         } while (reservations_umap.find(new_id) != reservations_umap.end());
 
         return new_id;
@@ -379,10 +380,11 @@ private:
         {
             std::string event_desc = std::get<0>(events[i]);
 
-            struct EventResponse event_response {
+            struct EventResponse event_response
+            {
                 .event_id = htonl(std::get<1>(events[i])),
                 .ticket_count = htons(std::get<2>(events[i])),
-                .description_length = (uint8_t) event_desc.length(),
+                .description_length = (uint8_t)event_desc.length(),
             };
 
             memcpy(buffer + buffer_index, &event_response, sizeof(event_response));
@@ -442,6 +444,8 @@ private:
     {
         if (read_length != GET_TICKETS_REQUEST_SIZE)
             return 0;
+        if (DEBUG)
+            std::cerr << "got GET_TICKETS reservation_id = " << ntohl(*(reservation_id_t *)(buffer + 1)) << " ";
 
         // reservation_id, cookie
         reservation_id_t reservation_id = ntohl(*(reservation_id_t *)(buffer + 1));
@@ -470,8 +474,8 @@ private:
         buffer[sizeof(message_id_t) + sizeof(reservation_id) + 1] = (uint8_t)(ticket_count_net_order & 0xff);
 
         memcpy(buffer + sizeof(message_id_t) + sizeof(reservation_id) + sizeof(ticket_count_t),
-                 tickets.data(), 
-                 tickets.size());
+               tickets.data(),
+               tickets.size());
 
         return sizeof(message_id_t) + sizeof(reservation_id) + sizeof(ticket_count_t) + tickets.size();
     }
@@ -483,7 +487,7 @@ private:
 
         switch (request_type)
         {
-        case request_type_t::GET_EVENTS:                
+        case request_type_t::GET_EVENTS:
             response_len = handle_get_events(read_length);
             break;
         case request_type_t::GET_RESERVATION:
@@ -495,6 +499,7 @@ private:
         default:
             if (DEBUG)
                 std::cerr << "Incorrect message_id: " << (message_id_t)buffer[0] << " no response sent \n";
+            break;
         }
 
         return response_len;
@@ -545,10 +550,8 @@ public:
 
             if (DEBUG)
             {
-                fprintf(stderr, "received %zd bytes from client %s:%u message: ", read_length, client_ip, client_port);
-                for (size_t i = 0; i < read_length && i < DEBUG_MAX_RECEIVE_BYTES_PRINT; i++)
-                    printf("%02X ", buffer[i]);
-                std::cerr << "\n";
+                fprintf(stderr, "\nreceived %zd bytes from client %s:%u message: ", read_length, client_ip, client_port);
+                std::cerr << " ";
             }
 
             size_t response_len = handle_request(read_length);
