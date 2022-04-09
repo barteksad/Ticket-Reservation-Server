@@ -23,6 +23,7 @@
 #include <string.h>
 #include <errno.h>
 #include <endian.h>
+#include <unistd.h>
 
 #ifdef NDEBUG
 const bool DEBUG = true;
@@ -231,8 +232,8 @@ public:
 
     std::tuple<reservation_id_t, cookie_t, expiration_time_t> create_reservation(event_id_t event_id, ticket_count_t ticket_count)
     {
-        size_t ticket_size = ticket_count * sizeof(Ticket);
-        if (ticket_count == 0 || ticket_size + TICKETS_RESPONSE_HEADER_SIZE > BUFFER_SIZE)
+        size_t tickets_size = ticket_count * sizeof(Ticket);
+        if (ticket_count == 0 || tickets_size + TICKETS_RESPONSE_HEADER_SIZE > BUFFER_SIZE)
             throw std::runtime_error("ticket reservation error! invalid ticket count");
 
         auto event_it = event_id_to_tickets_count_map.find(event_id);
@@ -393,8 +394,6 @@ private:
             buffer_index += sizeof(char) * event_response.description_length;
         }
 
-        if (DEBUG)
-            std::cerr << "sending : " << buffer_index << " bytes\n";
         return buffer_index;
     }
 
@@ -402,8 +401,6 @@ private:
     {
         if (read_length != GET_RESERVATION_REQUEST_SIZE)
             return 0;
-        if (DEBUG)
-            std::cerr << "got GET_RESERVATION, ";
 
         event_id_t event_id = ntohl(*(event_id_t *)(buffer + 1));
         ticket_count_t ticket_count = ntohs(*(ticket_count_t *)(buffer + sizeof(event_id_t) + 1));
@@ -411,6 +408,9 @@ private:
         reservation_id_t reservation_id;
         cookie_t cookie;
         expiration_time_t expiration_time;
+
+        if (DEBUG)
+            std::cerr << "got GET_RESERVATION, ";
 
         try
         {
@@ -437,6 +437,14 @@ private:
         buffer[0] = (message_id_t)request_type_t::RESERVATION;
         memcpy(buffer + sizeof(message_id_t), &reservation_response, sizeof(reservation_response));
 
+        if (DEBUG)
+        {
+            std::cerr << " reservation data: id: " << reservation_id << ", cookie: ";
+            for (auto c : cookie)
+                std::cerr << c;
+            std::cerr << ", expiration time: " << expiration_time << " ";
+        }
+
         return sizeof(reservation_response) + sizeof(message_id_t);
     }
 
@@ -444,12 +452,18 @@ private:
     {
         if (read_length != GET_TICKETS_REQUEST_SIZE)
             return 0;
-        if (DEBUG)
-            std::cerr << "got GET_TICKETS reservation_id = " << ntohl(*(reservation_id_t *)(buffer + 1)) << " ";
 
         // reservation_id, cookie
         reservation_id_t reservation_id = ntohl(*(reservation_id_t *)(buffer + 1));
         cookie_t cookie(buffer + 1 + sizeof(reservation_id), buffer + 1 + sizeof(reservation_id) + COOKIE_SIZE);
+
+        if (DEBUG)
+        {
+            std::cerr << "got GET_TICKETS, id: " << reservation_id << ", cookie: ";
+            for (auto c : cookie)
+                std::cerr << c;
+            std::cerr << " ";
+        }
 
         std::vector<char> tickets;
         try
@@ -536,6 +550,11 @@ public:
         }
     }
 
+    ~TicketServer()
+    {
+        close(socket_fd);
+    }
+
     void listen()
     {
         struct sockaddr_in client_address;
@@ -557,6 +576,9 @@ public:
             size_t response_len = handle_request(read_length);
             if (response_len == 0)
                 continue;
+
+            if (DEBUG)
+                std::cerr << "sending : " << response_len << " bytes\n";
 
             send_message(&client_address, response_len);
         }
