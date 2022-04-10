@@ -317,7 +317,7 @@ private:
         reservation_id_t reservation_id;
         event_id_t event_id;
         ticket_count_t ticket_count;
-        char cookie[48];
+        char cookie[48] = {'\0'}; // default value to disable missing initialization warning
         expiration_time_t expiration_time;
     };
 
@@ -598,8 +598,7 @@ int main(const int argc, const char *argv[])
     }
     catch (const std::exception &e)
     {
-        if (DEBUG)
-            std::cerr << e.what() << '\n';
+        std::cerr << e.what() << '\n';
         return 1;
     }
 
